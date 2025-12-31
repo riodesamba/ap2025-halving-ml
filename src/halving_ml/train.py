@@ -105,21 +105,193 @@ def _evaluate_metrics(
     else:
         pr_auc = average_precision_score(y_true, scores)
         f1 = f1_score(y_true, preds, zero_division=0)
-
-    metrics = {
-        "roc_auc": roc_auc,
-        "pr_auc": pr_auc,
-        "f1": f1,
-        "threshold": threshold,
-        "n_samples": n_samples,
-        "n_positives": n_positives,
-        "n_negatives": n_negatives,
-        "n_predicted_positives": n_predicted_positives,
-        "n_pos_test": n_positives,
-        "n_neg_test": n_negatives,
-        "pos_rate_test": pos_rate,
-        "degenerate_fold": degenerate,
-    }
+ 
+     metrics = {
+         "roc_auc": roc_auc,
+         "pr_auc": pr_auc,
+         "f1": f1,
+         "threshold": threshold,
+         "n_samples": n_samples,
+         "n_positives": n_positives,
+         "n_negatives": n_negatives,
+         "n_predicted_positives": n_predicted_positives,
+         "n_pos_test": n_positives,
+         "n_neg_test": n_negatives,
+         "pos_rate_test": pos_rate,
+         "degenerate_fold": degenerate,
+     }
+ 
+     if log_counts:
+         note = None
+         if degenerate:
+             note = "degenerate test fold; AUC metrics undefined"
+         _log_split_counts(log_context or "metrics", n_samples, n_positives, n_predicted_positives, note=note)
+ 
+     return metrics
+ 
+ 
++def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
++    scores = np.asarray(scores, dtype=float)
++    valid_mask = ~np.isnan(scores)
++    if not valid_mask.any():
+         return 0.5
+-    precision, recall, thresh = precision_recall_curve(y_true, scores)
++    y_valid = y_true.iloc[valid_mask]
++    scores_valid = scores[valid_mask]
++    precision, recall, thresh = precision_recall_curve(y_valid, scores_valid)
+     if len(thresh) == 0:
+         return 0.5
+     f1_vals = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-8)
+     best_idx = int(np.nanargmax(f1_vals))
+     return float(thresh[best_idx])
+ 
+ 
+ def _prepare_features(include_halving: bool) -> pd.DataFrame:
+     raw = data.load_data()
+     feats = features.build_features(raw, include_halving=include_halving)
+     df = labels.add_labels(feats)
+     df = df.dropna().reset_index(drop=True)
+     return df
+ 
+ 
+ def _get_feature_columns(df: pd.DataFrame) -> List[str]:
+     exclude = {"Date", "volatility", "y", "r_t"}
+     return [c for c in df.columns if c not in exclude]
+ 
+ 
+ def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> Tuple:
+     params_grid = config.MODEL_GRIDS[model_name]
+     param_options = list(ParameterGrid(params_grid))
+     if config.GRID_MAX_EVALS and len(param_options) > config.GRID_MAX_EVALS:
+         rng = np.random.default_rng(seed=42)
+         chosen_idx = rng.choice(len(param_options), size=config.GRID_MAX_EVALS, replace=False)
+         param_options = [param_options[i] for i in sorted(chosen_idx)]
+     if not param_options:
+         raise RuntimeError(f"No hyperparameter options found for model '{model_name}'.")
+     inner_train, val_idx = split.inner_train_val_split(X_train.index)
+     X_inner_train, X_val = X_train.loc[inner_train], X_train.loc[val_idx]
+     y_inner_train, y_val = y_train.loc[inner_train], y_train.loc[val_idx]
+ 
+     best_score = -np.inf
+     best_params = None
+     best_threshold = 0.5
+ 
+     for params in param_options:
+         if model_name == "logreg":
+             estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+-            estimator = LogisticRegression(solver="lbfgs", **params)
+         elif model_name == "random_forest":
+-            estimator = RandomForestClassifier(**params)
+             estimator = RandomForestClassifier(**params, n_jobs=1)
+         elif model_name == "xgboost":
+-            estimator = XGBClassifier(**params)
+             estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
+         else:
+             raise ValueError(model_name)
+ 
+         pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
+         pipe.fit(X_inner_train, y_inner_train)
+         val_scores = pipe.predict_proba(X_val)[:, 1]
+         threshold = _select_threshold(y_val, val_scores)
+         metrics = _evaluate_metrics(y_val, val_scores, threshold)
+         if np.isnan(metrics["pr_auc"]):
+             continue
+         if metrics["pr_auc"] > best_score:
+             best_score = metrics["pr_auc"]
+             best_params = params
+             best_threshold = threshold
+ 
+     if best_params is None:
+         best_params = param_options[0]
+         best_threshold = 0.5
+ 
+     return best_params, best_threshold
+ 
+ 
+ def _fit_and_eval_model(
+     model_name: str,
+     params: Dict,
+     threshold: float,
+     X_train,
+     y_train,
+     X_test,
+     y_test,
+     *,
+     log_counts: bool = False,
+     log_context: str | None = None,
+ ):
+     if model_name == "logreg":
+         estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+-        estimator = LogisticRegression(solver="lbfgs", **params)
+     elif model_name == "random_forest":
+-        estimator = RandomForestClassifier(**params)
+         estimator = RandomForestClassifier(**params, n_jobs=1)
+     elif model_name == "xgboost":
+-        estimator = XGBClassifier(**params)
+         estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
+     else:
+         raise ValueError(model_name)
+ 
+     pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
+     pipe.fit(X_train, y_train)
+     test_scores = pipe.predict_proba(X_test)[:, 1]
+     metrics = _evaluate_metrics(y_test, test_scores, threshold, log_counts=log_counts, log_context=log_context)
+     return metrics, test_scores
+ 
+ 
+ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
+     df = _prepare_features(include_halving=include_halving)
+     feature_cols = _get_feature_columns(df)
+ 
+     records = []
+     for wf in split.walk_forward_splits(df):
+         train_idx, test_idx = wf["train_idx"], wf["test_idx"]
+         fold = wf["fold"]
+ 
+         train_df = df.loc[train_idx]
+         test_df = df.loc[test_idx]
+ 
+         threshold = train_df["volatility"].quantile(0.75)
+         y_train = labels.apply_threshold(train_df, threshold)
+         y_test = labels.apply_threshold(test_df, threshold)
+ 
+         X_train, X_test = train_df[feature_cols], test_df[feature_cols]
+-cd /files/ap2025-halving-ml-backup
+-
+-git init
+-git branch -M main
+-git remote add origin https://github.com/riodesamba/ap2025-halving-ml.git
+-
+-git add .
+-git commit -m "Initial project implementation"
+-
+-git push -f origin main
+-
+         # Baselines
+         majority_scores = baselines.majority_class_baseline(y_train, len(test_idx))
+         majority_metrics = _evaluate_metrics(
+             y_test,
+             majority_scores.values,
+             0.5,
+             log_counts=True,
+             log_context=f"fold={fold}, model=majority",
+         )
+         majority_metrics.update({"model": "majority", "fold": fold, "include_halving": include_halving})
+         records.append(majority_metrics)
+ 
+         last_regime_scores = baselines.last_regime_baseline(pd.concat([y_train, y_test]), test_idx)
+         last_regime_metrics = _evaluate_metrics(
+             y_test,
+             last_regime_scores.values,
+             0.5,
+             log_counts=True,
+             log_context=f"fold={fold}, model=last_regime",
+         )
+         last_regime_metrics.update({"model": "last_regime", "fold": fold, "include_halving": include_halving})
+         records.append(last_regime_metrics)
+ 
+         garch_scores = baselines.garch_baseline(df.set_index("Date")["r_t"], test_idx)
+         garch_metrics = _evaluate_metrics(
 
     if log_counts:
         note = None
@@ -127,164 +299,7 @@ def _evaluate_metrics(
             note = "degenerate test fold; AUC metrics undefined"
         _log_split_counts(log_context or "metrics", n_samples, n_positives, n_predicted_positives, note=note)
 
-    return metrics
 
-
-        return 0.5
-    precision, recall, thresh = precision_recall_curve(y_true, scores)
-    if len(thresh) == 0:
-        return 0.5
-    f1_vals = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-8)
-    best_idx = int(np.nanargmax(f1_vals))
-    return float(thresh[best_idx])
-
-
-def _prepare_features(include_halving: bool) -> pd.DataFrame:
-    raw = data.load_data()
-    feats = features.build_features(raw, include_halving=include_halving)
-    df = labels.add_labels(feats)
-    df = df.dropna().reset_index(drop=True)
-    return df
-
-
-def _get_feature_columns(df: pd.DataFrame) -> List[str]:
-    exclude = {"Date", "volatility", "y", "r_t"}
-    return [c for c in df.columns if c not in exclude]
-
-
-def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> Tuple:
-    params_grid = config.MODEL_GRIDS[model_name]
-    param_options = list(ParameterGrid(params_grid))
-    if config.GRID_MAX_EVALS and len(param_options) > config.GRID_MAX_EVALS:
-        rng = np.random.default_rng(seed=42)
-        chosen_idx = rng.choice(len(param_options), size=config.GRID_MAX_EVALS, replace=False)
-        param_options = [param_options[i] for i in sorted(chosen_idx)]
-    if not param_options:
-        raise RuntimeError(f"No hyperparameter options found for model '{model_name}'.")
-    inner_train, val_idx = split.inner_train_val_split(X_train.index)
-    X_inner_train, X_val = X_train.loc[inner_train], X_train.loc[val_idx]
-    y_inner_train, y_val = y_train.loc[inner_train], y_train.loc[val_idx]
-
-    best_score = -np.inf
-    best_params = None
-    best_threshold = 0.5
-
-    for params in param_options:
-        if model_name == "logreg":
-            estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
-            estimator = LogisticRegression(solver="lbfgs", **params)
-        elif model_name == "random_forest":
-            estimator = RandomForestClassifier(**params)
-            estimator = RandomForestClassifier(**params, n_jobs=1)
-        elif model_name == "xgboost":
-            estimator = XGBClassifier(**params)
-            estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
-        else:
-            raise ValueError(model_name)
-
-        pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
-        pipe.fit(X_inner_train, y_inner_train)
-        val_scores = pipe.predict_proba(X_val)[:, 1]
-        threshold = _select_threshold(y_val, val_scores)
-        metrics = _evaluate_metrics(y_val, val_scores, threshold)
-        if np.isnan(metrics["pr_auc"]):
-            continue
-        if metrics["pr_auc"] > best_score:
-            best_score = metrics["pr_auc"]
-            best_params = params
-            best_threshold = threshold
-
-    if best_params is None:
-        best_params = param_options[0]
-        best_threshold = 0.5
-
-    return best_params, best_threshold
-
-
-def _fit_and_eval_model(
-    model_name: str,
-    params: Dict,
-    threshold: float,
-    X_train,
-    y_train,
-    X_test,
-    y_test,
-    *,
-    log_counts: bool = False,
-    log_context: str | None = None,
-):
-    if model_name == "logreg":
-        estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
-        estimator = LogisticRegression(solver="lbfgs", **params)
-    elif model_name == "random_forest":
-        estimator = RandomForestClassifier(**params)
-        estimator = RandomForestClassifier(**params, n_jobs=1)
-    elif model_name == "xgboost":
-        estimator = XGBClassifier(**params)
-        estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
-    else:
-        raise ValueError(model_name)
-
-    pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
-    pipe.fit(X_train, y_train)
-    test_scores = pipe.predict_proba(X_test)[:, 1]
-    metrics = _evaluate_metrics(y_test, test_scores, threshold, log_counts=log_counts, log_context=log_context)
-    return metrics, test_scores
-
-
-def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
-    df = _prepare_features(include_halving=include_halving)
-    feature_cols = _get_feature_columns(df)
-
-    records = []
-    for wf in split.walk_forward_splits(df):
-        train_idx, test_idx = wf["train_idx"], wf["test_idx"]
-        fold = wf["fold"]
-
-        train_df = df.loc[train_idx]
-        test_df = df.loc[test_idx]
-
-        threshold = train_df["volatility"].quantile(0.75)
-        y_train = labels.apply_threshold(train_df, threshold)
-        y_test = labels.apply_threshold(test_df, threshold)
-
-        X_train, X_test = train_df[feature_cols], test_df[feature_cols]
-cd /files/ap2025-halving-ml-backup
-
-git init
-git branch -M main
-git remote add origin https://github.com/riodesamba/ap2025-halving-ml.git
-
-git add .
-git commit -m "Initial project implementation"
-
-git push -f origin main
-
-        # Baselines
-        majority_scores = baselines.majority_class_baseline(y_train, len(test_idx))
-        majority_metrics = _evaluate_metrics(
-            y_test,
-            majority_scores.values,
-            0.5,
-            log_counts=True,
-            log_context=f"fold={fold}, model=majority",
-        )
-        majority_metrics.update({"model": "majority", "fold": fold, "include_halving": include_halving})
-        records.append(majority_metrics)
-
-        last_regime_scores = baselines.last_regime_baseline(pd.concat([y_train, y_test]), test_idx)
-        last_regime_metrics = _evaluate_metrics(
-            y_test,
-            last_regime_scores.values,
-            0.5,
-            log_counts=True,
-            log_context=f"fold={fold}, model=last_regime",
-        )
-        last_regime_metrics.update({"model": "last_regime", "fold": fold, "include_halving": include_halving})
-        records.append(last_regime_metrics)
-
-        garch_scores = baselines.garch_baseline(df.set_index("Date")["r_t"], test_idx)
-        garch_metrics = _evaluate_metrics(
             y_test,
             garch_scores.values,
             threshold,
