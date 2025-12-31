@@ -352,17 +352,6 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
             log_counts=True,
             log_context=f"fold={fold}, model=garch",
         )
-                garch_train_scores, garch_scores = baselines.garch_baseline(
-            base_df.set_index("Date")["r_t"], train_idx, test_idx
-        )
-        garch_threshold = _select_threshold(y_train, garch_train_scores.loc[train_idx].values)
-        garch_metrics = _evaluate_metrics(
-            y_test,
-            garch_scores.values,
-            garch_threshold,
-            log_counts=True,
-            log_context=f"fold={fold}, model=garch",
-        )
         garch_metrics.update(
             {
                 "model": "garch",
