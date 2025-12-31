@@ -52,9 +52,18 @@ def plot_pr_auc_by_fold(metrics_df: pd.DataFrame):
 def plot_ablation_delta(summary_df: pd.DataFrame):
     fig, ax = plt.subplots(figsize=config.PLOT_STYLE["figsize"])
     subset = summary_df.drop_duplicates("model")
-    ax.bar(subset["model"], subset["delta_pr_auc"], color="steelblue")
+    ax.bar(subset["model"], subset["delta_pr_auc_mean"], color="steelblue")
     ax.set_ylabel("PR-AUC delta (with - without)")
-    ax.set_title("Impact of Halving Features")
+
+    delta_counts = subset.set_index("model")["n_folds_valid_delta"]
+    title = "Impact of Halving Features"
+    if delta_counts.notna().any():
+        if delta_counts.nunique() == 1:
+            title = f"{title} (n_folds_valid_delta={int(delta_counts.iloc[0])})"
+        else:
+            title = f"{title} (n_folds_valid_delta range: {int(delta_counts.min())}-{int(delta_counts.max())})"
+    ax.set_title(title)
+
     fig.tight_layout()
     fig.savefig(config.FIGURE_DIR / "ablation_delta.png")
     plt.close(fig)
@@ -73,6 +82,7 @@ def write_report(summary_df: pd.DataFrame, metrics_df: pd.DataFrame):
         "Note: Some test folds contained only one class (no positives or no negatives). "
         "AUC metrics are undefined for those folds and are excluded from mean calculations; "
         "AUC averages are computed over valid folds only; if a model/run has 0 valid folds, mean AUC is reported as NaN. "
+        "Delta PR-AUC values are computed only on folds that are valid for both halving and non-halving runs. "
         "Refer to prevalence columns for context."
     )
     lines = [

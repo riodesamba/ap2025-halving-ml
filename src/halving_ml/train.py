@@ -43,6 +43,38 @@ def _safe_nanstd(values: np.ndarray) -> float:
     return float(np.nanstd(values, ddof=ddof))
 
 
+def _summarize_delta(group: pd.DataFrame) -> pd.Series:
+    pr_auc_with = group["pr_auc_with"].to_numpy()
+    pr_auc_without = group["pr_auc_without"].to_numpy()
+    valid = ~np.isnan(pr_auc_with) & ~np.isnan(pr_auc_without)
+    deltas = pr_auc_with[valid] - pr_auc_without[valid]
+
+    return pd.Series(
+        {
+            "delta_pr_auc_mean": _safe_nanmean(deltas),
+            "delta_pr_auc_std": _safe_nanstd(deltas),
+            "n_folds_valid_delta": int(valid.sum()),
+            "n_folds_total_delta": len(group),
+        }
+    )
+
+
+def _compute_delta_stats(metrics_df_with: pd.DataFrame, metrics_df_without: pd.DataFrame) -> pd.DataFrame:
+    merged = (
+        metrics_df_with[["model", "fold", "pr_auc"]]
+        .rename(columns={"pr_auc": "pr_auc_with"})
+        .merge(
+            metrics_df_without[["model", "fold", "pr_auc"]].rename(columns={"pr_auc": "pr_auc_without"}),
+            on=["model", "fold"],
+            how="outer",
+        )
+    )
+
+    delta_stats = merged.groupby("model").apply(_summarize_delta).reset_index()
+    delta_stats["delta_pr_auc"] = delta_stats["delta_pr_auc_mean"]
+    return delta_stats
+
+
 def _log_split_counts(context: str, n_samples: int, n_pos: int, n_pred_pos: int, note: str | None = None) -> None:
     prefix = f"[{context}] " if context else ""
     message = f"{prefix}n_samples={n_samples}, n_positives={n_pos}, n_predicted_positives={n_pred_pos}"
@@ -146,106 +178,81 @@ def _prepare_features(include_halving: bool) -> pd.DataFrame:
     feats = features.build_features(raw, include_halving=include_halving)
     df = labels.add_labels(feats)
     df = df.dropna().reset_index(drop=True)
-    return df
+
+    X = df[config.FEATURE_NAMES].copy()
+    y = df["label"].astype(int)
+    return X, y, df
 
 
-def _get_feature_columns(df: pd.DataFrame) -> List[str]:
-    exclude = {"Date", "volatility", "y", "r_t"}
-    return [c for c in df.columns if c not in exclude]
-
-
-def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> Tuple:
-    params_grid = config.MODEL_GRIDS[model_name]
-    param_options = list(ParameterGrid(params_grid))
-    if not param_options:
-        raise RuntimeError(f"No hyperparameter options found for model '{model_name}'.")
-    inner_train, val_idx = split.inner_train_val_split(X_train.index)
-    X_inner_train, X_val = X_train.loc[inner_train], X_train.loc[val_idx]
-    y_inner_train, y_val = y_train.loc[inner_train], y_train.loc[val_idx]
-
-    best_score = -np.inf
+def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[str, float], float]:
+    param_grid = config.MODEL_PARAMS[model_name]
     best_params = None
+    best_f1 = -np.inf
     best_threshold = 0.5
 
-    for params in param_options:
+    for params in ParameterGrid(param_grid):
         if model_name == "logreg":
-            logreg_params = {k: v for k, v in params.items() if k != "penalty"}
-            estimator = LogisticRegression(solver="saga", **logreg_params)
+            model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**params))])
         elif model_name == "random_forest":
-            estimator = RandomForestClassifier(**params)
+            model = RandomForestClassifier(**params)
         elif model_name == "xgboost":
-            estimator = XGBClassifier(**params)
+            model = XGBClassifier(**params)
         else:
-            raise ValueError(model_name)
+            raise ValueError(f"Unknown model: {model_name}")
 
-        pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
-        pipe.fit(X_inner_train, y_inner_train)
-        val_scores = pipe.predict_proba(X_val)[:, 1]
-        threshold = _select_threshold(y_val, val_scores)
-        metrics = _evaluate_metrics(y_val, val_scores, threshold)
-        if np.isnan(metrics["pr_auc"]):
-            continue
-        if metrics["pr_auc"] > best_score:
-            best_score = metrics["pr_auc"]
+        model.fit(X, y)
+        scores = model.predict_proba(X)[:, 1]
+        threshold = _select_threshold(y, scores)
+        preds = (scores >= threshold).astype(int)
+        f1 = f1_score(y, preds, zero_division=0)
+
+        if f1 > best_f1:
+            best_f1 = f1
             best_params = params
             best_threshold = threshold
-
-    if best_params is None:
-        best_params = param_options[0]
-        best_threshold = 0.5
 
     return best_params, best_threshold
 
 
 def _fit_and_eval_model(
     model_name: str,
-    params: Dict,
+    params: Dict[str, float],
     threshold: float,
-    X_train,
-    y_train,
-    X_test,
-    y_test,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    y_test: pd.Series,
     *,
     log_counts: bool = False,
     log_context: str | None = None,
-):
+) -> Tuple[Dict[str, float], pd.Series]:
     if model_name == "logreg":
-        logreg_params = {k: v for k, v in params.items() if k != "penalty"}
-        estimator = LogisticRegression(solver="saga", **logreg_params)
+        model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**params))])
     elif model_name == "random_forest":
-        estimator = RandomForestClassifier(**params)
+        model = RandomForestClassifier(**params)
     elif model_name == "xgboost":
-        estimator = XGBClassifier(**params)
+        model = XGBClassifier(**params)
     else:
-        raise ValueError(model_name)
+        raise ValueError(f"Unknown model: {model_name}")
 
-    pipe = Pipeline([("scaler", StandardScaler()), ("model", estimator)])
-    pipe.fit(X_train, y_train)
-    test_scores = pipe.predict_proba(X_test)[:, 1]
-    metrics = _evaluate_metrics(y_test, test_scores, threshold, log_counts=log_counts, log_context=log_context)
-    return metrics, test_scores
+    model.fit(X_train, y_train)
+    scores = model.predict_proba(X_test)[:, 1]
+    metrics = _evaluate_metrics(y_test, scores, threshold, log_counts=log_counts, log_context=log_context)
+    return metrics, pd.Series(scores, index=y_test.index)
 
 
 def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
-    df = _prepare_features(include_halving=include_halving)
-    feature_cols = _get_feature_columns(df)
+    X, y, df = _prepare_features(include_halving=include_halving)
+    splits = split.time_series_cv_splits(df)
+    records: List[Dict[str, float]] = []
 
-    records = []
-    for wf in split.walk_forward_splits(df):
-        train_idx, test_idx = wf["train_idx"], wf["test_idx"]
-        fold = wf["fold"]
+    for fold, (train_idx, test_idx) in enumerate(splits):
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        train_df = df.loc[train_idx]
-        test_df = df.loc[test_idx]
+        threshold = _select_threshold(y_train, X_train.mean(axis=1))
 
-        threshold = train_df["volatility"].quantile(0.75)
-        y_train = labels.apply_threshold(train_df, threshold)
-        y_test = labels.apply_threshold(test_df, threshold)
-
-        X_train, X_test = train_df[feature_cols], test_df[feature_cols]
-
-        # Baselines
-        majority_scores = baselines.majority_class_baseline(y_train, len(test_idx))
+        majority_scores = baselines.majority_class_baseline(y_train, test_idx)
         majority_metrics = _evaluate_metrics(
             y_test,
             majority_scores.values,
@@ -310,6 +317,7 @@ def aggregate_results(metrics_df_with: pd.DataFrame, metrics_df_without: pd.Data
             "No evaluation records were produced. Ensure price data is available or "
             "place a CSV/Excel file at data/raw.csv before running the pipeline."
         )
+
     summary = (
         combined.groupby(["model", "include_halving"])
         .agg(
@@ -326,11 +334,27 @@ def aggregate_results(metrics_df_with: pd.DataFrame, metrics_df_without: pd.Data
         .reset_index()
     )
 
+    delta_stats = _compute_delta_stats(metrics_df_with, metrics_df_without)
     ablation = summary.pivot(index="model", columns="include_halving", values="pr_auc_mean")
-    ablation["delta_pr_auc"] = ablation.get(True, 0) - ablation.get(False, 0)
     ablation = ablation.reset_index().rename(columns={True: "pr_auc_with_halving", False: "pr_auc_without_halving"})
+    ablation = ablation.merge(delta_stats, on="model", how="left")
 
-    summary = summary.merge(ablation[["model", "pr_auc_with_halving", "pr_auc_without_halving", "delta_pr_auc"]], on="model", how="left")
+    summary = summary.merge(
+        ablation[
+            [
+                "model",
+                "pr_auc_with_halving",
+                "pr_auc_without_halving",
+                "delta_pr_auc",
+                "delta_pr_auc_mean",
+                "delta_pr_auc_std",
+                "n_folds_valid_delta",
+                "n_folds_total_delta",
+            ]
+        ],
+        on="model",
+        how="left",
+    )
     return combined, summary
 
 
