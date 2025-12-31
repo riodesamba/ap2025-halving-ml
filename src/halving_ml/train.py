@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import matplotlib.pyplot as plt  # noqa: F401
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
@@ -19,7 +19,7 @@ from xgboost import XGBClassifier
 from . import baselines, config, data, features, labels, plots, split
 
 
-def ensure_output_dirs() -> None:
+def ensure_output_dirs():
     for path in [config.DATA_DIR, config.OUTPUT_DIR, config.TABLE_DIR, config.FIGURE_DIR]:
         Path(path).mkdir(parents=True, exist_ok=True)
 
@@ -67,7 +67,6 @@ def _evaluate_metrics(
     n_neg_raw = n_samples_raw - n_pos_raw
     pos_rate_raw = float(n_pos_raw / n_samples_raw) if n_samples_raw else float("nan")
     degenerate_raw = y_true.nunique() < 2 or n_pos_raw == 0 or n_neg_raw == 0
-
     if not valid_mask.any():
         metrics = {
             "roc_auc": float("nan"),
@@ -84,7 +83,7 @@ def _evaluate_metrics(
             "degenerate_fold": degenerate_raw,
         }
         if log_counts:
-            _log_split_counts(log_context or "metrics", n_samples_raw, n_pos_raw, 0, "no valid scores")
+            _log_split_counts(log_context or "metrics", n_samples_raw, int(y_true.sum()), 0, "no valid scores")
         return metrics
 
     if not valid_mask.all():
@@ -132,13 +131,9 @@ def _evaluate_metrics(
 
 
 def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
-    scores = np.asarray(scores, dtype=float)
-    valid_mask = ~np.isnan(scores)
-    if not valid_mask.any():
+    if y_true.nunique() < 2 or y_true.sum() == 0:
         return 0.5
-    y_valid = y_true.iloc[valid_mask]
-    scores_valid = scores[valid_mask]
-    precision, recall, thresh = precision_recall_curve(y_valid, scores_valid)
+    precision, recall, thresh = precision_recall_curve(y_true, scores)
     if len(thresh) == 0:
         return 0.5
     f1_vals = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-8)
@@ -162,28 +157,23 @@ def _get_feature_columns(df: pd.DataFrame) -> List[str]:
 def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> Tuple:
     params_grid = config.MODEL_GRIDS[model_name]
     param_options = list(ParameterGrid(params_grid))
-    if config.GRID_MAX_EVALS and len(param_options) > config.GRID_MAX_EVALS:
-        rng = np.random.default_rng(seed=42)
-        chosen_idx = rng.choice(len(param_options), size=config.GRID_MAX_EVALS, replace=False)
-        param_options = [param_options[i] for i in sorted(chosen_idx)]
     if not param_options:
         raise RuntimeError(f"No hyperparameter options found for model '{model_name}'.")
-
     inner_train, val_idx = split.inner_train_val_split(X_train.index)
     X_inner_train, X_val = X_train.loc[inner_train], X_train.loc[val_idx]
     y_inner_train, y_val = y_train.loc[inner_train], y_train.loc[val_idx]
 
     best_score = -np.inf
-    best_params: Dict | None = None
+    best_params = None
     best_threshold = 0.5
 
     for params in param_options:
         if model_name == "logreg":
             estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
         elif model_name == "random_forest":
-            estimator = RandomForestClassifier(**params, n_jobs=1)
+            estimator = RandomForestClassifier(**params)
         elif model_name == "xgboost":
-            estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
+            estimator = XGBClassifier(**params)
         else:
             raise ValueError(model_name)
 
@@ -221,9 +211,9 @@ def _fit_and_eval_model(
     if model_name == "logreg":
         estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
     elif model_name == "random_forest":
-        estimator = RandomForestClassifier(**params, n_jobs=1)
+        estimator = RandomForestClassifier(**params)
     elif model_name == "xgboost":
-        estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
+        estimator = XGBClassifier(**params)
     else:
         raise ValueError(model_name)
 
@@ -288,7 +278,7 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
 
         for model_name in ["logreg", "random_forest", "xgboost"]:
             params, best_threshold = _grid_search(model_name, X_train, y_train)
-            metrics, _ = _fit_and_eval_model(
+            metrics, scores = _fit_and_eval_model(
                 model_name,
                 params,
                 best_threshold,
@@ -299,14 +289,12 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
                 log_counts=True,
                 log_context=f"fold={fold}, model={model_name}",
             )
-            metrics.update(
-                {
-                    "model": model_name,
-                    "fold": fold,
-                    "include_halving": include_halving,
-                    "param_choice": params,
-                }
-            )
+            metrics.update({
+                "model": model_name,
+                "fold": fold,
+                "include_halving": include_halving,
+                "param_choice": params,
+            })
             records.append(metrics)
 
     metrics_df = pd.DataFrame(records)
@@ -340,11 +328,7 @@ def aggregate_results(metrics_df_with: pd.DataFrame, metrics_df_without: pd.Data
     ablation["delta_pr_auc"] = ablation.get(True, 0) - ablation.get(False, 0)
     ablation = ablation.reset_index().rename(columns={True: "pr_auc_with_halving", False: "pr_auc_without_halving"})
 
-    summary = summary.merge(
-        ablation[["model", "pr_auc_with_halving", "pr_auc_without_halving", "delta_pr_auc"]],
-        on="model",
-        how="left",
-    )
+    summary = summary.merge(ablation[["model", "pr_auc_with_halving", "pr_auc_without_halving", "delta_pr_auc"]], on="model", how="left")
     return combined, summary
 
 
