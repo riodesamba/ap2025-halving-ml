@@ -24,6 +24,13 @@ def ensure_output_dirs():
         Path(path).mkdir(parents=True, exist_ok=True)
 
 
+def _feature_columns(include_halving: bool) -> List[str]:
+    cols = list(config.BASE_FEATURES)
+    if include_halving:
+        cols.extend(config.HALVING_FEATURES)
+    return cols
+
+
 def _count_non_nan(values: np.ndarray) -> int:
     return int(np.sum(~np.isnan(values)))
 
@@ -41,6 +48,14 @@ def _safe_nanstd(values: np.ndarray) -> float:
         return float("nan")
     ddof = 1 if n_valid > 1 else 0
     return float(np.nanstd(values, ddof=ddof))
+
+
+def _prepare_base_frame() -> pd.DataFrame:
+    raw = data.load_data()
+    feats = features.build_features(raw, include_halving=True)
+    df = labels.add_labels(feats)
+    df = df.dropna().reset_index(drop=True)
+    return df
 
 
 def _summarize_delta(group: pd.DataFrame) -> pd.Series:
@@ -70,9 +85,26 @@ def _compute_delta_stats(metrics_df_with: pd.DataFrame, metrics_df_without: pd.D
         )
     )
 
-    delta_stats = merged.groupby("model").apply(_summarize_delta).reset_index()
+    grouped = merged.groupby("model")[["pr_auc_with", "pr_auc_without"]]
+    delta_stats = grouped.apply(_summarize_delta).reset_index()
     delta_stats["delta_pr_auc"] = delta_stats["delta_pr_auc_mean"]
     return delta_stats
+
+
+def _build_fold_definitions(df: pd.DataFrame) -> List[Dict]:
+    folds = []
+    for split_def in split.walk_forward_splits(df):
+        train_idx, test_idx = split_def["train_idx"], split_def["test_idx"]
+        threshold = float(df.loc[train_idx, "volatility"].quantile(config.LABEL_QUANTILE))
+        folds.append(
+            {
+                **split_def,
+                "threshold": threshold,
+                "train_size": len(train_idx),
+                "eval_size": len(test_idx),
+            }
+        )
+    return folds
 
 
 def _log_split_counts(context: str, n_samples: int, n_pos: int, n_pred_pos: int, note: str | None = None) -> None:
@@ -81,6 +113,14 @@ def _log_split_counts(context: str, n_samples: int, n_pos: int, n_pred_pos: int,
     if note:
         message = f"{message} ({note})"
     print(message)
+
+
+def _persist_partial_metrics(records: List[Dict], include_halving: bool) -> None:
+    if not records:
+        return
+    suffix = "with_halving" if include_halving else "without_halving"
+    config.TABLE_DIR.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(records).to_csv(config.TABLE_DIR / f"metrics_by_fold_{suffix}_partial.csv", index=False)
 
 
 def _evaluate_metrics(
@@ -173,24 +213,23 @@ def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
     return float(thresh[best_idx])
 
 
-def _prepare_features(include_halving: bool) -> pd.DataFrame:
-    raw = data.load_data()
-    feats = features.build_features(raw, include_halving=include_halving)
-    df = labels.add_labels(feats)
-    df = df.dropna().reset_index(drop=True)
-
-    X = df[config.FEATURE_NAMES].copy()
-    y = df["label"].astype(int)
-    return X, y, df
+def _iter_param_configs(model_name: str) -> List[Dict]:
+    grid = list(ParameterGrid(config.MODEL_GRIDS[model_name]))
+    budget = config.MODEL_SEARCH_BUDGET.get(model_name, len(grid))
+    if budget >= len(grid):
+        return grid
+    rng = np.random.default_rng(seed=42)
+    chosen = rng.choice(len(grid), size=budget, replace=False)
+    return [grid[i] for i in chosen]
 
 
 def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[str, float], float]:
-    param_grid = config.MODEL_PARAMS[model_name]
+    param_grid = _iter_param_configs(model_name)
     best_params = None
     best_f1 = -np.inf
     best_threshold = 0.5
 
-    for params in ParameterGrid(param_grid):
+    for params in param_grid:
         if model_name == "logreg":
             model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**params))])
         elif model_name == "random_forest":
@@ -241,18 +280,25 @@ def _fit_and_eval_model(
     return metrics, pd.Series(scores, index=y_test.index)
 
 
-def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
-    X, y, df = _prepare_features(include_halving=include_halving)
-    splits = split.time_series_cv_splits(df)
+def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: List[Dict]) -> pd.DataFrame:
+    feature_cols = _feature_columns(include_halving)
     records: List[Dict[str, float]] = []
 
-    for fold, (train_idx, test_idx) in enumerate(splits):
-        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
-        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+    for fold_def in folds:
+        fold = fold_def["fold"]
+        train_idx, test_idx = fold_def["train_idx"], fold_def["test_idx"]
+        threshold = fold_def["threshold"]
 
-        threshold = _select_threshold(y_train, X_train.mean(axis=1))
+        train_df = base_df.loc[train_idx]
+        test_df = base_df.loc[test_idx]
 
-        majority_scores = baselines.majority_class_baseline(y_train, test_idx)
+        y_train = labels.apply_threshold(train_df, threshold)
+        y_test = labels.apply_threshold(test_df, threshold)
+
+        X_train = train_df[feature_cols]
+        X_test = test_df[feature_cols]
+
+        majority_scores = baselines.majority_class_baseline(y_train, len(test_idx))
         majority_metrics = _evaluate_metrics(
             y_test,
             majority_scores.values,
@@ -260,7 +306,16 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
             log_counts=True,
             log_context=f"fold={fold}, model=majority",
         )
-        majority_metrics.update({"model": "majority", "fold": fold, "include_halving": include_halving})
+        majority_metrics.update(
+            {
+                "model": "majority",
+                "fold": fold,
+                "include_halving": include_halving,
+                "train_size": fold_def["train_size"],
+                "eval_size": fold_def["eval_size"],
+                "label_threshold": threshold,
+            }
+        )
         records.append(majority_metrics)
 
         last_regime_scores = baselines.last_regime_baseline(pd.concat([y_train, y_test]), test_idx)
@@ -271,10 +326,19 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
             log_counts=True,
             log_context=f"fold={fold}, model=last_regime",
         )
-        last_regime_metrics.update({"model": "last_regime", "fold": fold, "include_halving": include_halving})
+        last_regime_metrics.update(
+            {
+                "model": "last_regime",
+                "fold": fold,
+                "include_halving": include_halving,
+                "train_size": fold_def["train_size"],
+                "eval_size": fold_def["eval_size"],
+                "label_threshold": threshold,
+            }
+        )
         records.append(last_regime_metrics)
 
-        garch_scores = baselines.garch_baseline(df.set_index("Date")["r_t"], test_idx)
+        garch_scores = baselines.garch_baseline(base_df.set_index("Date")["r_t"], test_idx)
         garch_metrics = _evaluate_metrics(
             y_test,
             garch_scores.values,
@@ -282,7 +346,16 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
             log_counts=True,
             log_context=f"fold={fold}, model=garch",
         )
-        garch_metrics.update({"model": "garch", "fold": fold, "include_halving": include_halving})
+        garch_metrics.update(
+            {
+                "model": "garch",
+                "fold": fold,
+                "include_halving": include_halving,
+                "train_size": fold_def["train_size"],
+                "eval_size": fold_def["eval_size"],
+                "label_threshold": threshold,
+            }
+        )
         records.append(garch_metrics)
 
         for model_name in ["logreg", "random_forest", "xgboost"]:
@@ -298,13 +371,20 @@ def run_single_pipeline(include_halving: bool) -> pd.DataFrame:
                 log_counts=True,
                 log_context=f"fold={fold}, model={model_name}",
             )
-            metrics.update({
-                "model": model_name,
-                "fold": fold,
-                "include_halving": include_halving,
-                "param_choice": params,
-            })
+            metrics.update(
+                {
+                    "model": model_name,
+                    "fold": fold,
+                    "include_halving": include_halving,
+                    "param_choice": params,
+                    "train_size": fold_def["train_size"],
+                    "eval_size": fold_def["eval_size"],
+                    "label_threshold": threshold,
+                }
+            )
             records.append(metrics)
+
+        _persist_partial_metrics(records, include_halving)
 
     metrics_df = pd.DataFrame(records)
     return metrics_df
@@ -366,8 +446,28 @@ def main(args=None):
 
     ensure_output_dirs()
 
-    metrics_with = run_single_pipeline(include_halving=True)
-    metrics_without = run_single_pipeline(include_halving=False)
+    base_df = _prepare_base_frame()
+    folds = _build_fold_definitions(base_df)
+    if not folds:
+        raise RuntimeError("No walk-forward folds were generated; check the available data range.")
+
+    fold_metadata = pd.DataFrame(
+        [
+            {
+                "fold": f["fold"],
+                "start": f["start"],
+                "end": f["end"],
+                "train_size": f["train_size"],
+                "eval_size": f["eval_size"],
+                "label_threshold": f["threshold"],
+            }
+            for f in folds
+        ]
+    )
+    fold_metadata.to_csv(config.TABLE_DIR / "fold_metadata.csv", index=False)
+
+    metrics_with = run_single_pipeline(include_halving=True, base_df=base_df, folds=folds)
+    metrics_without = run_single_pipeline(include_halving=False, base_df=base_df, folds=folds)
 
     combined_metrics, summary = aggregate_results(metrics_with, metrics_without)
 

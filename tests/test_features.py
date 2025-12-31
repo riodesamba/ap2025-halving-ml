@@ -7,6 +7,7 @@ import pandas as pd
 sys.path.append(str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from halving_ml import features  # noqa: E402
+from halving_ml import config  # noqa: E402
 
 
 def _dummy_prices(n: int = 80, start_price: float = 100.0):
@@ -37,3 +38,18 @@ def test_lagged_return_matches_manual_computation():
     first_idx = feats.index[0]
     expected = np.log(df.loc[first_idx - 1, "Close"] / df.loc[first_idx - 2, "Close"])
     assert np.isclose(feats.iloc[0]["r_lag"], expected)
+
+
+def test_config_feature_names_align_with_built_features():
+    df = _dummy_prices()
+
+    feats_with = features.build_features(df, include_halving=True).dropna()
+    feats_without = features.build_features(df, include_halving=False).dropna()
+
+    expected_with = set(config.get_feature_names(include_halving=True))
+    expected_without = set(config.get_feature_names(include_halving=False))
+
+    assert expected_with.issubset(set(feats_with.columns))
+    assert expected_without.issubset(set(feats_without.columns))
+    assert expected_with.issuperset(expected_without)
+    assert not expected_without.intersection(config.HALVING_FEATURE_NAMES)
