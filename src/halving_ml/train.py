@@ -169,7 +169,8 @@ def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> 
 
     for params in param_options:
         if model_name == "logreg":
-            estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+            logreg_params = {k: v for k, v in params.items() if k != "penalty"}
+            estimator = LogisticRegression(solver="saga", **logreg_params)
         elif model_name == "random_forest":
             estimator = RandomForestClassifier(**params)
         elif model_name == "xgboost":
@@ -209,7 +210,8 @@ def _fit_and_eval_model(
     log_context: str | None = None,
 ):
     if model_name == "logreg":
-        estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+        logreg_params = {k: v for k, v in params.items() if k != "penalty"}
+        estimator = LogisticRegression(solver="saga", **logreg_params)
     elif model_name == "random_forest":
         estimator = RandomForestClassifier(**params)
     elif model_name == "xgboost":
