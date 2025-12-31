@@ -223,6 +223,14 @@ def _iter_param_configs(model_name: str) -> List[Dict]:
     return [grid[i] for i in chosen]
 
 
+def _logreg_params(params: Dict[str, float]) -> Dict[str, float]:
+    """Prepare LogisticRegression kwargs while keeping the search space minimal."""
+    base_params = {"solver": "saga", "random_state": 42}
+    if "max_iter" not in params:
+        base_params["max_iter"] = 1000
+    return {**base_params, **params}
+
+
 def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[str, float], float]:
     param_grid = _iter_param_configs(model_name)
     best_params = None
@@ -231,7 +239,9 @@ def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[s
 
     for params in param_grid:
         if model_name == "logreg":
-            model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**params))])
+             model = Pipeline(
+                [("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))]
+            )
         elif model_name == "random_forest":
             model = RandomForestClassifier(**params)
         elif model_name == "xgboost":
@@ -266,7 +276,7 @@ def _fit_and_eval_model(
     log_context: str | None = None,
 ) -> Tuple[Dict[str, float], pd.Series]:
     if model_name == "logreg":
-        model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**params))])
+        model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))])
     elif model_name == "random_forest":
         model = RandomForestClassifier(**params)
     elif model_name == "xgboost":

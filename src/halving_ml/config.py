@@ -53,10 +53,6 @@ MODEL_GRIDS = {
         "C": [0.5, 1.0],
         "l1_ratio": [0.5],
         "max_iter": [1000],
-        "penalty": ["elasticnet"],
-        "solver": ["saga"],
-        "n_jobs": [1],
-        "random_state": [42],
     },
     "random_forest": {
         "n_estimators": [100],
