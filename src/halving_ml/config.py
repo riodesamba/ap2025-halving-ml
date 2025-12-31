@@ -49,6 +49,8 @@ MODEL_GRIDS = {
     },
 }
 
+GRID_MAX_EVALS = 5
+
 PLOT_STYLE = {
     "style": "seaborn-v0_8",
     "figsize": (10, 5),
@@ -69,5 +71,6 @@ __all__ = [
     "SPLIT_START",
     "SPLIT_FREQ_MONTHS",
     "MODEL_GRIDS",
+    "GRID_MAX_EVALS",
     "PLOT_STYLE",
 ]

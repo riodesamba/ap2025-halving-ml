@@ -130,8 +130,6 @@ def _evaluate_metrics(
     return metrics
 
 
-def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
-    if y_true.nunique() < 2 or y_true.sum() == 0:
         return 0.5
     precision, recall, thresh = precision_recall_curve(y_true, scores)
     if len(thresh) == 0:
@@ -157,6 +155,10 @@ def _get_feature_columns(df: pd.DataFrame) -> List[str]:
 def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> Tuple:
     params_grid = config.MODEL_GRIDS[model_name]
     param_options = list(ParameterGrid(params_grid))
+    if config.GRID_MAX_EVALS and len(param_options) > config.GRID_MAX_EVALS:
+        rng = np.random.default_rng(seed=42)
+        chosen_idx = rng.choice(len(param_options), size=config.GRID_MAX_EVALS, replace=False)
+        param_options = [param_options[i] for i in sorted(chosen_idx)]
     if not param_options:
         raise RuntimeError(f"No hyperparameter options found for model '{model_name}'.")
     inner_train, val_idx = split.inner_train_val_split(X_train.index)
@@ -170,10 +172,13 @@ def _grid_search(model_name: str, X_train: pd.DataFrame, y_train: pd.Series) -> 
     for params in param_options:
         if model_name == "logreg":
             estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+            estimator = LogisticRegression(solver="lbfgs", **params)
         elif model_name == "random_forest":
             estimator = RandomForestClassifier(**params)
+            estimator = RandomForestClassifier(**params, n_jobs=1)
         elif model_name == "xgboost":
             estimator = XGBClassifier(**params)
+            estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
         else:
             raise ValueError(model_name)
 
@@ -210,10 +215,13 @@ def _fit_and_eval_model(
 ):
     if model_name == "logreg":
         estimator = LogisticRegression(penalty="elasticnet", solver="saga", **params)
+        estimator = LogisticRegression(solver="lbfgs", **params)
     elif model_name == "random_forest":
         estimator = RandomForestClassifier(**params)
+        estimator = RandomForestClassifier(**params, n_jobs=1)
     elif model_name == "xgboost":
         estimator = XGBClassifier(**params)
+        estimator = XGBClassifier(**params, n_jobs=1, tree_method="hist")
     else:
         raise ValueError(model_name)
 
