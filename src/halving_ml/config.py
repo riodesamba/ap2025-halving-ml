@@ -43,6 +43,7 @@ BASE_FEATURES = [
     "sma10_sma50_ratio",
     "drawdown",
 ]
+HALVING_FEATURE_NAMES = list(HALVING_FEATURES)
 
 SPLIT_START = datetime(2017, 12, 31)
 SPLIT_FREQ_MONTHS = 6
@@ -105,4 +106,14 @@ __all__ = [
     "MODEL_GRIDS",
     "MODEL_SEARCH_BUDGET",
     "PLOT_STYLE",
+    "HALVING_FEATURE_NAMES",
+    "get_feature_names",
 ]
+
+
+def get_feature_names(include_halving: bool = True):
+    """Return the feature names used for modeling."""
+    names = list(BASE_FEATURES)
+    if include_halving:
+        names.extend(HALVING_FEATURES)
+    return names
