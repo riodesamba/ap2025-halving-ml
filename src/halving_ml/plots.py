@@ -101,4 +101,27 @@ def write_report(summary_df: pd.DataFrame, metrics_df: pd.DataFrame):
     (config.REPORT_PATH).write_text("\n".join(lines))
 
 
-__all__ = ["plot_volatility_with_halvings", "plot_pr_auc_by_fold", "plot_ablation_delta", "write_report"]
+def plot_results(summary_df: pd.DataFrame, metrics_df: pd.DataFrame):
+    """Generate all plots for a pipeline run."""
+    config.FIGURE_DIR.mkdir(parents=True, exist_ok=True)
+    if not metrics_df.empty:
+        plot_pr_auc_by_fold(metrics_df[metrics_df["include_halving"]])
+    plot_ablation_delta(summary_df)
+    plot_volatility_with_halvings()
+
+
+def save_report(summary_df: pd.DataFrame, metrics_df: pd.DataFrame, *, silent: bool = False):
+    """Persist report to disk."""
+    write_report(summary_df, metrics_df)
+    if not silent:
+        print(f"Report saved to {config.REPORT_PATH}")
+
+
+__all__ = [
+    "plot_volatility_with_halvings",
+    "plot_pr_auc_by_fold",
+    "plot_ablation_delta",
+    "plot_results",
+    "write_report",
+    "save_report",
+]
