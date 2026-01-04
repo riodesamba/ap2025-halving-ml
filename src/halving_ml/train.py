@@ -436,6 +436,12 @@ def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = Fal
 
 def main():
     parser = argparse.ArgumentParser(description="Run the halving-ML pipeline.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional path to a config file (currently unused; defaults to package config).",
+    )
     parser.add_argument("--no-halving", action="store_true", help="Exclude halving features.")
     parser.add_argument("--no-plot", action="store_true", help="Skip plotting results.")
     parser.add_argument("--no-report", action="store_true", help="Skip saving report.")
@@ -445,6 +451,8 @@ def main():
     include_halving = not args.no_halving
     plot = not args.no_plot
     save_report = not args.no_report
+    if args.config and not args.silent:
+        print("Custom config paths are accepted but currently ignored; using default config.")
 
     run(include_halving, plot, save_report, silent=args.silent)
 
