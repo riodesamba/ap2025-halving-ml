@@ -74,6 +74,47 @@ def _summarize_delta(group: pd.DataFrame) -> pd.Series:
     )
 
 
+def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
+    """Pick the probability threshold that maximizes F1 on the provided labels."""
+    if len(np.unique(y_true)) == 1:
+        return 0.5
+    precision, recall, thresholds = precision_recall_curve(y_true, scores)
+    with np.errstate(invalid="ignore"):
+        f1_scores = 2 * (precision * recall) / (precision + recall)
+    f1_scores = np.nan_to_num(f1_scores, nan=0.0)
+    # precision_recall_curve returns len(thresholds) == len(precision) - 1
+    best_idx = int(np.argmax(f1_scores[:-1])) if len(thresholds) > 0 else 0
+    return float(thresholds[best_idx]) if len(thresholds) > 0 else 0.5
+
+
+def _evaluate_metrics(
+    y_true: pd.Series, scores: np.ndarray, threshold: float, *, log_counts: bool = False, log_context: str | None = None
+) -> Dict[str, float]:
+    preds = (scores >= threshold).astype(int)
+    n_pos = int(y_true.sum())
+    n_pred_pos = int(preds.sum())
+    degenerate_fold = len(np.unique(y_true)) < 2
+
+    roc_auc = float("nan")
+    pr_auc = float("nan")
+    if not degenerate_fold:
+        roc_auc = float(roc_auc_score(y_true, scores))
+        pr_auc = float(average_precision_score(y_true, scores))
+
+    f1 = float(f1_score(y_true, preds, zero_division=0))
+
+    if log_counts:
+        note = "degenerate fold" if degenerate_fold else None
+        _log_split_counts(log_context or "", len(y_true), n_pos, n_pred_pos, note=note)
+
+    return {
+        "roc_auc": roc_auc,
+        "pr_auc": pr_auc,
+        "f1": f1,
+        "degenerate_fold": degenerate_fold,
+    }
+
+
 def _compute_delta_stats(metrics_df_with: pd.DataFrame, metrics_df_without: pd.DataFrame) -> pd.DataFrame:
     merged = (
         metrics_df_with[["model", "fold", "pr_auc"]]
@@ -221,6 +262,7 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
 
         y_train = labels.apply_threshold(train_df, threshold)
         y_test = labels.apply_threshold(test_df, threshold)
+        y_all = labels.apply_threshold(base_df, threshold)
 
         X_train = train_df[feature_cols]
         X_test = test_df[feature_cols]
@@ -245,7 +287,14 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
         )
         records.append(majority_metrics)
 
-        last_regime_metrics = baselines.last_regime_baseline(train_idx, test_idx, base_df["regime"].to_numpy(), y_test)
+        last_regime_scores = baselines.last_regime_baseline(y_all, test_idx)
+        last_regime_metrics = _evaluate_metrics(
+            y_test,
+            last_regime_scores.values,
+            0.5,
+            log_counts=True,
+            log_context=f"fold={fold}, model=last_regime",
+        )
         last_regime_metrics.update(
             {
                 "model": "last_regime",
@@ -374,18 +423,25 @@ def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = Fal
     metrics_df_without = run_single_pipeline(include_halving=False, base_df=base_df, folds=folds)
 
     summary = aggregate_results(metrics_df_with, metrics_df_without)
+    metrics_df = pd.concat([metrics_df_with, metrics_df_without], ignore_index=True)
 
     if plot:
-        plots.plot_results(summary)
+        plots.plot_results(summary, metrics_df)
 
     if save_report:
-        plots.save_report(summary, include_halving, silent=silent)
+        plots.save_report(summary, metrics_df, silent=silent)
 
     return summary
 
 
 def main():
     parser = argparse.ArgumentParser(description="Run the halving-ML pipeline.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Optional path to a config file (currently unused; defaults to package config).",
+    )
     parser.add_argument("--no-halving", action="store_true", help="Exclude halving features.")
     parser.add_argument("--no-plot", action="store_true", help="Skip plotting results.")
     parser.add_argument("--no-report", action="store_true", help="Skip saving report.")
@@ -395,6 +451,8 @@ def main():
     include_halving = not args.no_halving
     plot = not args.no_plot
     save_report = not args.no_report
+    if args.config and not args.silent:
+        print("Custom config paths are accepted but currently ignored; using default config.")
 
     run(include_halving, plot, save_report, silent=args.silent)
 
