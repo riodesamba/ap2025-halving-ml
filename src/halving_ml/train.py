@@ -178,16 +178,16 @@ def _iter_param_configs(model_name: str) -> List[Dict]:
 
 def _logreg_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """Prepare LogisticRegression kwargs while keeping the search space minimal."""
-    base_params: Dict[str, Any] = {"solver": "saga", "penalty": "elasticnet", "random_state": 42}
-    params_without_penalty = {k: v for k, v in params.items() if k != "penalty"}
+    base_params: Dict[str, Any] = {"solver": "saga", "random_state": 42}
 
-    if "penalty" in params and params.get("penalty") != "elasticnet":
-        raise ValueError("LogisticRegression penalty must be elasticnet when l1_ratio is provided.")
+    if "penalty" in params:
+        raise ValueError("Do not set 'penalty' for LogisticRegression; control regularization via l1_ratio and C.")
 
-    if "max_iter" not in params_without_penalty:
-        params_without_penalty["max_iter"] = 1000
+    if "max_iter" not in params:
+        params = {**params, "max_iter": 1000}
 
-    return {**base_params, **params_without_penalty}
+
+    return {**base_params, **params}
 
 
 def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[str, float], float]:
@@ -198,8 +198,11 @@ def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[s
 
     for params in param_grid:
         if model_name == "logreg":
+            if "penalty" in params:
+                raise ValueError("LogisticRegression search space must not include 'penalty'.")
             model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))])
-            assert model.named_steps["clf"].penalty == "elasticnet", "LogReg must use elasticnet penalty"
+            clf_params = model.named_steps["clf"].get_params(deep=False)
+            assert clf_params.get("penalty", "deprecated") in {"deprecated", None}, "LogReg must rely on default penalty"
         elif model_name == "random_forest":
             model = RandomForestClassifier(**params)
         elif model_name == "xgboost":
@@ -234,6 +237,8 @@ def _fit_and_eval_model(
     log_context: str | None = None,
 ) -> Tuple[Dict[str, float], pd.Series]:
     if model_name == "logreg":
+        if "penalty" in params:
+            raise ValueError("LogisticRegression params must not set 'penalty'.")
         model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))])
     elif model_name == "random_forest":
         model = RandomForestClassifier(**params)
@@ -336,6 +341,8 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
         for model_name in ["logreg", "random_forest", "xgboost"]:
             params, best_threshold = _grid_search(model_name, X_train, y_train)
             param_choice = _logreg_params(params) if model_name == "logreg" else params
+            if model_name == "logreg":
+                assert "penalty" not in param_choice, "Logged logreg params must not include 'penalty'."
             metrics, scores = _fit_and_eval_model(
                 model_name,
                 params,
