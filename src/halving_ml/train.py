@@ -93,6 +93,9 @@ def _evaluate_metrics(
     preds = (scores >= threshold).astype(int)
     n_pos = int(y_true.sum())
     n_pred_pos = int(preds.sum())
+    n_samples = len(y_true)
+    n_neg = int(n_samples - n_pos)
+    pos_rate = float(n_pos / n_samples) if n_samples > 0 else float("nan")
     degenerate_fold = len(np.unique(y_true)) < 2
 
     roc_auc = float("nan")
@@ -112,6 +115,13 @@ def _evaluate_metrics(
         "pr_auc": pr_auc,
         "f1": f1,
         "degenerate_fold": degenerate_fold,
+        "n_samples": n_samples,
+        "n_positives": n_pos,
+        "n_negatives": n_neg,
+        "n_predicted_positives": n_pred_pos,
+        "n_pos_test": n_pos,
+        "n_neg_test": n_neg,
+        "pos_rate_test": pos_rate,
     }
 
 
@@ -433,7 +443,7 @@ def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = Fal
     metrics_df = pd.concat([metrics_df_with, metrics_df_without], ignore_index=True)
 
     if plot:
-        plots.plot_results(summary, metrics_df)
+        plots.plot_results(summary, metrics_df, base_df, folds)
 
     if save_report:
         plots.save_report(summary, metrics_df, silent=silent)
