@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -118,99 +118,11 @@ def _log_split_counts(context: str, n_samples: int, n_pos: int, n_pred_pos: int,
 def _persist_partial_metrics(records: List[Dict], include_halving: bool) -> None:
     if not records:
         return
-    suffix = "with_halving" if include_halving else "without_halving"
-    config.TABLE_DIR.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(records).to_csv(config.TABLE_DIR / f"metrics_by_fold_{suffix}_partial.csv", index=False)
 
-
-def _evaluate_metrics(
-    y_true: pd.Series,
-    scores: np.ndarray,
-    threshold: float,
-    *,
-    log_counts: bool = False,
-    log_context: str | None = None,
-) -> Dict[str, float]:
-    scores = np.asarray(scores, dtype=float)
-    valid_mask = ~np.isnan(scores)
-
-    n_samples_raw = len(y_true)
-    n_pos_raw = int(y_true.sum())
-    n_neg_raw = n_samples_raw - n_pos_raw
-    pos_rate_raw = float(n_pos_raw / n_samples_raw) if n_samples_raw else float("nan")
-    degenerate_raw = y_true.nunique() < 2 or n_pos_raw == 0 or n_neg_raw == 0
-    if not valid_mask.any():
-        metrics = {
-            "roc_auc": float("nan"),
-            "pr_auc": float("nan"),
-            "f1": float("nan"),
-            "threshold": threshold,
-            "n_samples": n_samples_raw,
-            "n_positives": n_pos_raw,
-            "n_negatives": n_neg_raw,
-            "n_predicted_positives": 0,
-            "n_pos_test": n_pos_raw,
-            "n_neg_test": n_neg_raw,
-            "pos_rate_test": pos_rate_raw,
-            "degenerate_fold": degenerate_raw,
-        }
-        if log_counts:
-            _log_split_counts(log_context or "metrics", n_samples_raw, int(y_true.sum()), 0, "no valid scores")
-        return metrics
-
-    if not valid_mask.all():
-        y_true = y_true.iloc[valid_mask]
-        scores = scores[valid_mask]
-
-    n_samples = len(y_true)
-    n_positives = int(y_true.sum())
-    n_negatives = n_samples - n_positives
-    pos_rate = float(n_positives / n_samples) if n_samples else float("nan")
-    degenerate = y_true.nunique() < 2 or n_positives == 0 or n_negatives == 0
-
-    roc_auc = float("nan") if degenerate else roc_auc_score(y_true, scores)
-    preds = (scores >= threshold).astype(int)
-    n_predicted_positives = int(preds.sum())
-    if degenerate:
-        pr_auc = float("nan")
-        f1 = f1_score(y_true, preds, zero_division=0)
-    else:
-        pr_auc = average_precision_score(y_true, scores)
-        f1 = f1_score(y_true, preds, zero_division=0)
-
-    metrics = {
-        "roc_auc": roc_auc,
-        "pr_auc": pr_auc,
-        "f1": f1,
-        "threshold": threshold,
-        "n_samples": n_samples,
-        "n_positives": n_positives,
-        "n_negatives": n_negatives,
-        "n_predicted_positives": n_predicted_positives,
-        "n_pos_test": n_positives,
-        "n_neg_test": n_negatives,
-        "pos_rate_test": pos_rate,
-        "degenerate_fold": degenerate,
-    }
-
-    if log_counts:
-        note = None
-        if degenerate:
-            note = "degenerate test fold; AUC metrics undefined"
-        _log_split_counts(log_context or "metrics", n_samples, n_positives, n_predicted_positives, note=note)
-
-    return metrics
-
-
-def _select_threshold(y_true: pd.Series, scores: np.ndarray) -> float:
-    if y_true.nunique() < 2 or y_true.sum() == 0:
-        return 0.5
-    precision, recall, thresh = precision_recall_curve(y_true, scores)
-    if len(thresh) == 0:
-        return 0.5
-    f1_vals = 2 * precision[:-1] * recall[:-1] / (precision[:-1] + recall[:-1] + 1e-8)
-    best_idx = int(np.nanargmax(f1_vals))
-    return float(thresh[best_idx])
+    df = pd.DataFrame(records)
+    suffix = "with" if include_halving else "without"
+    out_path = config.OUTPUT_DIR / f"partial_metrics_{suffix}.csv"
+    df.to_csv(out_path, index=False)
 
 
 def _iter_param_configs(model_name: str) -> List[Dict]:
@@ -223,12 +135,18 @@ def _iter_param_configs(model_name: str) -> List[Dict]:
     return [grid[i] for i in chosen]
 
 
-def _logreg_params(params: Dict[str, float]) -> Dict[str, float]:
+def _logreg_params(params: Dict[str, Any]) -> Dict[str, Any]:
     """Prepare LogisticRegression kwargs while keeping the search space minimal."""
-    base_params = {"solver": "saga", "random_state": 42}
-    if "max_iter" not in params:
-        base_params["max_iter"] = 1000
-    return {**base_params, **params}
+    base_params: Dict[str, Any] = {"solver": "saga", "penalty": "elasticnet", "random_state": 42}
+    params_without_penalty = {k: v for k, v in params.items() if k != "penalty"}
+
+    if "penalty" in params and params.get("penalty") != "elasticnet":
+        raise ValueError("LogisticRegression penalty must be elasticnet when l1_ratio is provided.")
+
+    if "max_iter" not in params_without_penalty:
+        params_without_penalty["max_iter"] = 1000
+
+    return {**base_params, **params_without_penalty}
 
 
 def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[str, float], float]:
@@ -239,9 +157,8 @@ def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[s
 
     for params in param_grid:
         if model_name == "logreg":
-             model = Pipeline(
-                [("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))]
-            )
+            model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))])
+            assert model.named_steps["clf"].penalty == "elasticnet", "LogReg must use elasticnet penalty"
         elif model_name == "random_forest":
             model = RandomForestClassifier(**params)
         elif model_name == "xgboost":
@@ -328,14 +245,7 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
         )
         records.append(majority_metrics)
 
-        last_regime_scores = baselines.last_regime_baseline(pd.concat([y_train, y_test]), test_idx)
-        last_regime_metrics = _evaluate_metrics(
-            y_test,
-            last_regime_scores.values,
-            0.5,
-            log_counts=True,
-            log_context=f"fold={fold}, model=last_regime",
-        )
+        last_regime_metrics = baselines.last_regime_baseline(train_idx, test_idx, base_df["regime"].to_numpy(), y_test)
         last_regime_metrics.update(
             {
                 "model": "last_regime",
@@ -376,6 +286,7 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
 
         for model_name in ["logreg", "random_forest", "xgboost"]:
             params, best_threshold = _grid_search(model_name, X_train, y_train)
+            param_choice = _logreg_params(params) if model_name == "logreg" else params
             metrics, scores = _fit_and_eval_model(
                 model_name,
                 params,
@@ -392,7 +303,7 @@ def run_single_pipeline(include_halving: bool, base_df: pd.DataFrame, folds: Lis
                     "model": model_name,
                     "fold": fold,
                     "include_halving": include_halving,
-                    "param_choice": params,
+                    "param_choice": param_choice,
                     "train_size": fold_def["train_size"],
                     "eval_size": fold_def["eval_size"],
                     "label_threshold": threshold,
@@ -451,50 +362,41 @@ def aggregate_results(metrics_df_with: pd.DataFrame, metrics_df_without: pd.Data
         on="model",
         how="left",
     )
-    return combined, summary
+    return summary
 
 
-def main(args=None):
-    parser = argparse.ArgumentParser(description="Halving ML pipeline")
-    parser.add_argument("--config", default="src/halving_ml/config.py", help="Path to config (unused placeholder)")
-    parsed = parser.parse_args(args=args)
-    _ = parsed
-
+def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = False) -> pd.DataFrame:
     ensure_output_dirs()
-
     base_df = _prepare_base_frame()
     folds = _build_fold_definitions(base_df)
-    if not folds:
-        raise RuntimeError("No walk-forward folds were generated; check the available data range.")
 
-    fold_metadata = pd.DataFrame(
-        [
-            {
-                "fold": f["fold"],
-                "start": f["start"],
-                "end": f["end"],
-                "train_size": f["train_size"],
-                "eval_size": f["eval_size"],
-                "label_threshold": f["threshold"],
-            }
-            for f in folds
-        ]
-    )
-    fold_metadata.to_csv(config.TABLE_DIR / "fold_metadata.csv", index=False)
+    metrics_df_with = run_single_pipeline(include_halving=True, base_df=base_df, folds=folds)
+    metrics_df_without = run_single_pipeline(include_halving=False, base_df=base_df, folds=folds)
 
-    metrics_with = run_single_pipeline(include_halving=True, base_df=base_df, folds=folds)
-    metrics_without = run_single_pipeline(include_halving=False, base_df=base_df, folds=folds)
+    summary = aggregate_results(metrics_df_with, metrics_df_without)
 
-    combined_metrics, summary = aggregate_results(metrics_with, metrics_without)
+    if plot:
+        plots.plot_results(summary)
 
-    config.TABLE_DIR.mkdir(parents=True, exist_ok=True)
-    combined_metrics.to_csv(config.TABLE_DIR / "metrics_by_fold.csv", index=False)
-    summary.to_csv(config.TABLE_DIR / "summary.csv", index=False)
+    if save_report:
+        plots.save_report(summary, include_halving, silent=silent)
 
-    plots.plot_volatility_with_halvings()
-    plots.plot_pr_auc_by_fold(combined_metrics)
-    plots.plot_ablation_delta(summary)
-    plots.write_report(summary, combined_metrics)
+    return summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run the halving-ML pipeline.")
+    parser.add_argument("--no-halving", action="store_true", help="Exclude halving features.")
+    parser.add_argument("--no-plot", action="store_true", help="Skip plotting results.")
+    parser.add_argument("--no-report", action="store_true", help="Skip saving report.")
+    parser.add_argument("--silent", action="store_true", help="Suppress logging output.")
+    args = parser.parse_args()
+
+    include_halving = not args.no_halving
+    plot = not args.no_plot
+    save_report = not args.no_report
+
+    run(include_halving, plot, save_report, silent=args.silent)
 
 
 if __name__ == "__main__":
