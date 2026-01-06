@@ -7,8 +7,6 @@ Predict **high-volatility days** in Bitcoin using ML (LogReg, RF, XGBoost) with 
 
 ```bash
 make all
-# or
-python -m halving_ml.train --config src/halving_ml/config.py
 ```
 
 `make all` will install dependencies from `requirements.txt` before running the pipeline. You can also install them manually with `make install`.
