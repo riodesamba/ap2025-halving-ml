@@ -7,7 +7,7 @@ export PYTHONPATH
 all: install run
 
 install:
-	$(PYTHON) -m pip install --quiet --requirement requirements.txt
+	$(PYTHON) -m pip install --quiet -e .
 
 run:
 	$(PYTHON) -m halving_ml.train --config src/halving_ml/config.py

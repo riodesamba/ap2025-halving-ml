@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: halving-ml
+Version: 0.1.0
+Requires-Dist: pandas>=2.1
+Requires-Dist: numpy>=1.26
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: xgboost>=2.0
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: scipy>=1.11
+Requires-Dist: statsmodels>=0.14
+Requires-Dist: arch>=6.3
+Requires-Dist: yfinance>=0.2
+Requires-Dist: pytest>=8.0
+Dynamic: requires-dist
