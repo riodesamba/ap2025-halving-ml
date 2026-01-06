@@ -212,7 +212,7 @@ def _grid_search(model_name: str, X: pd.DataFrame, y: pd.Series) -> Tuple[Dict[s
                 raise ValueError("LogisticRegression search space must not include 'penalty'.")
             model = Pipeline([("scaler", StandardScaler()), ("clf", LogisticRegression(**_logreg_params(params)))])
             clf_params = model.named_steps["clf"].get_params(deep=False)
-            assert clf_params.get("penalty", "deprecated") in {"deprecated", None}, "LogReg must rely on default penalty"
+            assert clf_params.get("penalty") in {"deprecated", "l2", None}, "LogReg must rely on default penalty"
         elif model_name == "random_forest":
             model = RandomForestClassifier(**params)
         elif model_name == "xgboost":
