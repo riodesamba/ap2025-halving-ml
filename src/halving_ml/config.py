@@ -4,13 +4,14 @@ from pathlib import Path
 
 DATA_DIR = Path("data")
 OUTPUT_DIR = Path("outputs")
+RESULTS_DIR = Path("results")
 TABLE_DIR = OUTPUT_DIR / "tables"
 FIGURE_DIR = OUTPUT_DIR / "figures"
-REPORT_PATH = OUTPUT_DIR / "report.md"
+REPORT_PATH = RESULTS_DIR / "report.md"
 RAW_DATA_PATH = DATA_DIR / "raw.csv"
 
 SYMBOL = "BTC-USD"
-DATA_START = datetime(2011, 1, 1)
+DATA_START = datetime(2010, 7, 30)
 
 HALVING_DATES = [
     datetime(2012, 11, 28),
