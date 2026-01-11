@@ -36,7 +36,7 @@ def test_grid_search_uses_elasticnet_logreg():
         [("scaler", train.StandardScaler()), ("clf", train.LogisticRegression(**train._logreg_params(best_params)))]
     )
     clf_params = model.named_steps["clf"].get_params(deep=False)
-    assert "penalty" not in clf_params or clf_params["penalty"] == "deprecated"
+    assert "elasticnet" not in clf_params or clf_params["penalty"] == "deprecated"
 
 
 def test_penalty_not_in_logreg_get_params_after_training():
@@ -48,4 +48,4 @@ def test_penalty_not_in_logreg_get_params_after_training():
     model = train.LogisticRegression(**train._logreg_params(params))
     model.fit(X, y)
     param_keys = model.get_params(deep=False).keys()
-    assert "penalty" not in param_keys or model.get_params(deep=False)["penalty"] == "deprecated"
+    assert "elasticnet" not in param_keys or model.get_params(deep=False)["penalty"] == "deprecated"

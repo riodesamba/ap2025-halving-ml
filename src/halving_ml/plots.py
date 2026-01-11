@@ -39,6 +39,9 @@ def _fold_level_frame(metrics_df: pd.DataFrame) -> pd.DataFrame:
 
 def plot_volatility_with_halvings(base_df: pd.DataFrame):
     df = base_df.dropna(subset=["volatility"])
+    df = df.assign(Date=pd.to_datetime(df["Date"]))
+    start_date = pd.Timestamp(config.DATA_START)
+    df = df[df["Date"] >= start_date]
     fig, ax = plt.subplots(figsize=config.PLOT_STYLE["figsize"])
     ax.plot(df["Date"], df["volatility"], label="Volatility (30d annualized)", color="steelblue")
     for date in config.HALVING_DATES:
@@ -51,6 +54,7 @@ def plot_volatility_with_halvings(base_df: pd.DataFrame):
         )
     ax.set_title("BTC Realized Volatility (30d) with Halving Dates")
     ax.set_ylabel("Annualized volatility")
+    ax.set_xlim(left=start_date)
     ax.legend()
     fig.tight_layout()
     fig.savefig(config.FIGURE_DIR / "volatility_with_halvings.png", dpi=150)
@@ -276,10 +280,17 @@ def write_report(summary_df: pd.DataFrame, metrics_df: pd.DataFrame):
     (config.REPORT_PATH).write_text("\n".join(lines))
 
 
-def plot_results(summary_df: pd.DataFrame, metrics_df: pd.DataFrame, base_df: pd.DataFrame, folds: Iterable[Dict]):
+def plot_results(
+    summary_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    base_df: pd.DataFrame,
+    folds: Iterable[Dict],
+    *,
+    plot_df: pd.DataFrame | None = None,
+):
     """Generate all plots for a pipeline run."""
     config.FIGURE_DIR.mkdir(parents=True, exist_ok=True)
-    plot_volatility_with_halvings(base_df)
+    plot_volatility_with_halvings(plot_df if plot_df is not None else base_df)    
     plot_label_threshold_example(base_df, folds, metrics_df)
     plot_walk_forward_splits(folds, base_df)
     plot_pos_rate_by_fold(metrics_df)

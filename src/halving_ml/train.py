@@ -50,13 +50,12 @@ def _safe_nanstd(values: np.ndarray) -> float:
     return float(np.nanstd(values, ddof=ddof))
 
 
-def _prepare_base_frame() -> pd.DataFrame:
+def _prepare_base_frame() -> tuple[pd.DataFrame, pd.DataFrame]:
     raw = data.load_data()
     feats = features.build_features(raw, include_halving=True)
-    df = labels.add_labels(feats)
-    df = df.dropna().reset_index(drop=True)
-    return df
-
+    plot_df = labels.add_labels(feats)
+    base_df = plot_df.dropna().reset_index(drop=True)
+    return base_df, plot_df
 
 def _summarize_delta(group: pd.DataFrame) -> pd.Series:
     pr_auc_with = group["pr_auc_with"].to_numpy()
@@ -433,7 +432,7 @@ def aggregate_results(metrics_df_with: pd.DataFrame, metrics_df_without: pd.Data
 
 def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = False) -> pd.DataFrame:
     ensure_output_dirs()
-    base_df = _prepare_base_frame()
+    base_df, plot_df = _prepare_base_frame()
     folds = _build_fold_definitions(base_df)
 
     metrics_df_with = run_single_pipeline(include_halving=True, base_df=base_df, folds=folds)
@@ -443,7 +442,7 @@ def run(include_halving: bool, plot: bool, save_report: bool, silent: bool = Fal
     metrics_df = pd.concat([metrics_df_with, metrics_df_without], ignore_index=True)
 
     if plot:
-        plots.plot_results(summary, metrics_df, base_df, folds)
+        plots.plot_results(summary, metrics_df, base_df, folds, plot_df=plot_df)
 
     if save_report:
         plots.save_report(summary, metrics_df, silent=silent)
